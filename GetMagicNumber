@@ -1,0 +1,118 @@
+
+https://docs.google.com/spreadsheets/d/16VMqHYmvt6K6i18gJtLuzXMYQi1Z2y6WillMbWnAjjg/edit?usp=sharing
+
+WITH Accounts as (
+SELECT	
+		a.Id Accountid,
+		a.Institution_Type__c,
+		a.Nearpod_Customer_Status__c ,
+		a.Ultimate_Parent_Account_ID_18__c,
+		a.School_Teachers__c,
+		a.District_Teachers__c,
+		case 
+		when a.Ultimate_Parent_Enrollment__c < 20000 then 'Small'
+		WHEN a.Ultimate_Parent_Enrollment__c between 20000 and 50000 then 'Medium'
+		WHEN a.Ultimate_Parent_Enrollment__c> 50000 then 'Large'
+		END EnrollmentBand
+FROM	lz.SFExt_Account a WITH (NOLOCK) 
+where	a.IsDeleted  = 0 and 
+		a.ETLDeleted = 0 
+)
+
+, Opps as (
+SELECT	a.AccountId,
+		a.Id Oppid,
+		a.Total_Nearpod_ACV__c,
+		a.License_Starts__c,
+		a.License_Finishes__c,
+		a.StageName
+FROM	lz.SFExt_Opportunity a WITH (NOLOCK) 
+where	a.IsDeleted  = 0 AND 
+		a.ETLDeleted = 0 AND 
+		a.Total_Nearpod_ACV__c>0
+)
+
+
+,Setup_FirstDistrictDeal as (
+SELECT	b.Ultimate_Parent_Account_ID_18__c,
+		a.License_Starts__c,
+		ROW_NUMBER() over (partition by b.Ultimate_Parent_Account_ID_18__c order by a.License_Starts__c) Orden
+FROM	Opps	 a 
+JOIN	Accounts b on b.Accountid = a.AccountId
+WHERE	a.StageName = 'Closed Won' AND 
+		b.Institution_Type__c like '%District%' 
+)
+
+, FirstDistrictDeal as (
+select a.Ultimate_Parent_Account_ID_18__c,a.License_Starts__c FirstDistrictDeal from Setup_FirstDistrictDeal a WHERE Orden = 1)
+
+, Setup_SchoolDeals as (
+SELECT	
+		b.Ultimate_Parent_Account_ID_18__c,
+		a.AccountId,
+		a.License_Starts__c,
+		ROW_NUMBER() over (partition by a.AccountId order by a.License_Starts__c) Orden
+FROM	Opps	 a 
+JOIN	Accounts b on b.Accountid = a.AccountId
+WHERE	a.StageName = 'Closed Won' AND 
+		b.Institution_Type__c like '%School%'  
+		)
+
+, Setup_SchoolDealsBeforeDistricts as (
+SELECT	
+			a.Ultimate_Parent_Account_ID_18__c,
+			a.AccountId,
+			a.License_Starts__c FirstSchoolDeal,
+			Coalesce(b.FirstDistrictDeal,'')FirstDistrictDeal,
+			ROW_NUMBER() over (partition by a.Ultimate_Parent_Account_ID_18__c order by a.License_Starts__c) Orden
+FROM		Setup_SchoolDeals a 
+LEFT JOIN	FirstDistrictDeal b on b.Ultimate_Parent_Account_ID_18__c = a.Ultimate_Parent_Account_ID_18__c
+Where		a.orden = 1 and (a.License_Starts__c<b.FirstDistrictDeal or b.FirstDistrictDeal is null)
+)
+
+, DistrictMagicDate as (
+SELECT	
+		a.Ultimate_Parent_Account_ID_18__c, 
+		a.FirstSchoolDeal MagicDate --The Date at which The 5th School Signed up (Only for Districts where this happened before a District Deal)
+		--b.District_Teachers__c
+FROM	Setup_SchoolDealsBeforeDistricts a 
+--JOIN	Accounts						 b on b.Ultimate_Parent_Account_ID_18__c = a.Ultimate_Parent_Account_ID_18__c
+where	a.Orden = 5										 
+		--b.Accountid = b.Ultimate_Parent_Account_ID_18__c and 
+		--b.District_Teachers__c is not null 
+GROUP BY 
+		a.Ultimate_Parent_Account_ID_18__c, 
+		a.FirstSchoolDeal 
+)
+
+
+, Setup_NbrofB2C as (
+SELECT 
+		a.ContactId,
+		b.Ultimate_Parent_Account_ID_18__c,
+		a.LicenseType,
+		a.FromDate,
+		a.ToDate,
+		c.MagicDate	
+FROM	fct.TeachersUpdates a WITH (NOLOCK)
+JOIN	Accounts			b on b.AccountId = a.AccountId
+JOIN	DistrictMagicDate   c on c.Ultimate_Parent_Account_ID_18__c = b.Ultimate_Parent_Account_ID_18__c AND 
+								 c.MagicDate>=a.FromDate 
+WHERE	--ContactId in ('0030W00003agaawQAA','0030W00003agaz9QAA','0030W00003agbktQAA') AND 
+		a.LicenseType in ('Silver','Gold','Platinum')
+)
+
+, NbrofSilversbyDistrict as (
+select	a.Ultimate_Parent_Account_ID_18__c,
+		count(distinct a.ContactId) B2CBeforeMagic
+FROM	Setup_NbrofB2C a 
+GROUP BY a.Ultimate_Parent_Account_ID_18__c
+)
+
+select a.Ultimate_Parent_Account_ID_18__c,b.B2CBeforeMagic, c.District_Teachers__c, EnrollmentBand From DistrictMagicDate a 
+JOIN NbrofSilversbyDistrict b on b.Ultimate_Parent_Account_ID_18__c = a.Ultimate_Parent_Account_ID_18__c
+JOIN	Accounts		    c on c.Ultimate_Parent_Account_ID_18__c = a.Ultimate_Parent_Account_ID_18__c
+WHERE 	c.Accountid = c.Ultimate_Parent_Account_ID_18__c  AND 
+		c.District_Teachers__c is not null				  AND 
+		c.District_Teachers__c>0 AND 
+		c.District_Teachers__c>=b.B2CBeforeMagic
