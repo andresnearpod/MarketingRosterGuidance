@@ -1,5 +1,25 @@
 
-https://docs.google.com/spreadsheets/d/16VMqHYmvt6K6i18gJtLuzXMYQi1Z2y6WillMbWnAjjg/edit?usp=sharing
+/*
+On average, it took 10% of teacher registrations in the District to sign the 1st 5 schools
+District X currently has 2 schools under contract and that district has had 20 silvers total (including those that are B2B Type today). Therefore, the guidance is that we need to create another 80 Silvers in that District. 
+
+Approach:
+Districts with 5 or more schools under contract
+Tag each district as large, medium or small
+Date when they got the 5th School 
+By that date, how many silvers did they have?
+
+
+Current Districts with more than 5 schools, but less than 5 Schools with contract
+Tag each as Large, medium or small
+Current amount of Silvers
+
+SELECT	* 
+FROM
+
+
+*/
+
 
 WITH Accounts as (
 SELECT	
@@ -9,6 +29,8 @@ SELECT
 		a.Ultimate_Parent_Account_ID_18__c,
 		a.School_Teachers__c,
 		a.District_Teachers__c,
+		a.Consolidated_State__c State,
+		a.Name Account,
 		case 
 		when a.Ultimate_Parent_Enrollment__c < 20000 then 'Small'
 		WHEN a.Ultimate_Parent_Enrollment__c between 20000 and 50000 then 'Medium'
@@ -25,11 +47,22 @@ SELECT	a.AccountId,
 		a.Total_Nearpod_ACV__c,
 		a.License_Starts__c,
 		a.License_Finishes__c,
-		a.StageName
-FROM	lz.SFExt_Opportunity a WITH (NOLOCK) 
+		a.StageName,
+		b.Type_of_license__c
+		FROM	lz.SFExt_Opportunity a WITH (NOLOCK) 
+		JOIN lz.SF_Opportunity b WITH (NOLOCK) on b.Id = a.Id
 where	a.IsDeleted  = 0 AND 
 		a.ETLDeleted = 0 AND 
 		a.Total_Nearpod_ACV__c>0
+)
+
+, NumberofSchoolsinDistrict as (
+select a.Ultimate_Parent_Account_ID_18__c,
+	   count(distinct a.Accountid) NumberoFSchools
+from Accounts a 
+WHERE a.Institution_Type__c like '%school%'
+GROUP BY a.Ultimate_Parent_Account_ID_18__c
+Having count(distinct a.Accountid)>=5
 )
 
 
@@ -40,7 +73,7 @@ SELECT	b.Ultimate_Parent_Account_ID_18__c,
 FROM	Opps	 a 
 JOIN	Accounts b on b.Accountid = a.AccountId
 WHERE	a.StageName = 'Closed Won' AND 
-		b.Institution_Type__c like '%District%' 
+		(b.Institution_Type__c like '%District%' or a.Type_of_license__c = 'District Edition')
 )
 
 , FirstDistrictDeal as (
@@ -99,7 +132,7 @@ JOIN	Accounts			b on b.AccountId = a.AccountId
 JOIN	DistrictMagicDate   c on c.Ultimate_Parent_Account_ID_18__c = b.Ultimate_Parent_Account_ID_18__c AND 
 								 c.MagicDate>=a.FromDate 
 WHERE	--ContactId in ('0030W00003agaawQAA','0030W00003agaz9QAA','0030W00003agbktQAA') AND 
-		a.LicenseType in ('Silver','Gold','Platinum')
+		a.LicenseType in ('Silver','Gold','Platinum') --and a.RegisteredFrom <> 'Backend'
 )
 
 , NbrofSilversbyDistrict as (
@@ -109,10 +142,66 @@ FROM	Setup_NbrofB2C a
 GROUP BY a.Ultimate_Parent_Account_ID_18__c
 )
 
+
+
+/*
+--RUN THIS QUERY TO GET THE MAGIC NUMBER
 select a.Ultimate_Parent_Account_ID_18__c,b.B2CBeforeMagic, c.District_Teachers__c, EnrollmentBand From DistrictMagicDate a 
 JOIN NbrofSilversbyDistrict b on b.Ultimate_Parent_Account_ID_18__c = a.Ultimate_Parent_Account_ID_18__c
 JOIN	Accounts		    c on c.Ultimate_Parent_Account_ID_18__c = a.Ultimate_Parent_Account_ID_18__c
+JOIN NumberofSchoolsinDistrict d on d.Ultimate_Parent_Account_ID_18__c = a.Ultimate_Parent_Account_ID_18__c
 WHERE 	c.Accountid = c.Ultimate_Parent_Account_ID_18__c  AND 
 		c.District_Teachers__c is not null				  AND 
 		c.District_Teachers__c>0 AND 
-		c.District_Teachers__c>=b.B2CBeforeMagic
+		c.District_Teachers__c>=b.B2CBeforeMagic AND 
+		d.NumberoFSchools>=5
+*/
+
+
+--/* Run from here on to get info for current Districts
+--Districts with NP District Deal ever
+, DistrictsWithNPDistDeal as (
+SELECT		b.Ultimate_Parent_Account_ID_18__c 
+FROM		Opps a 
+JOIN		Accounts b on b.Accountid = a.AccountId
+WHERE		a.StageName = 'Closed Won' and 
+			(b.Institution_Type__c like '%District%' or a.Type_of_license__c = 'District Edition')
+GROUP BY	b.Ultimate_Parent_Account_ID_18__c 
+)
+
+
+, DistrictswithLessthan5SchoolDealsEver as (
+SELECT		b.Ultimate_Parent_Account_ID_18__c
+FROM		Opps a 
+JOIN		Accounts b on b.Accountid = a.AccountId
+LEFT JOIN	DistrictsWithNPDistDeal c on c.Ultimate_Parent_Account_ID_18__c = b.Ultimate_Parent_Account_ID_18__c
+WHERE		a.StageName = 'Closed Won' and 
+			b.Institution_Type__c like '%School%' AND 
+			c.Ultimate_Parent_Account_ID_18__c is null 
+GROUP BY	b.Ultimate_Parent_Account_ID_18__c 
+having		count(distinct a.AccountId)<5
+)
+
+
+, Setup_NbrofB2C_Ever as (
+SELECT 
+		b.Ultimate_Parent_Account_ID_18__c,
+		count(distinct a.ContactId) CurrentB2C
+FROM	fct.TeachersUpdates a WITH (NOLOCK)
+JOIN	Accounts			b on b.AccountId = a.AccountId
+JOIN	DistrictswithLessthan5SchoolDealsEver c on c.Ultimate_Parent_Account_ID_18__c = b.Ultimate_Parent_Account_ID_18__c
+JOIN	NumberofSchoolsinDistrict d on d.Ultimate_Parent_Account_ID_18__c = b.Ultimate_Parent_Account_ID_18__c
+
+WHERE	
+		a.LicenseType in ('Silver','Gold','Platinum') and 
+		d.NumberoFSchools>=5
+		
+GROUP BY b.Ultimate_Parent_Account_ID_18__c
+)
+
+select a.Ultimate_Parent_Account_ID_18__c,b.State,b.Account,a.CurrentB2C,b.District_Teachers__c, b.EnrollmentBand from Setup_NbrofB2C_Ever a
+JOIN	Accounts			b on b.Accountid = a.Ultimate_Parent_Account_ID_18__c
+where District_Teachers__c>0 and District_Teachers__c>CurrentB2C
+order by 2,5 desc
+
+--*/
